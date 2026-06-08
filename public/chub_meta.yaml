@@ -11,10 +11,13 @@ tags:
 
 config_schema:
   type: object
-  properties: {}
+  properties:
+    sendStatusToPrompt:
+      type: boolean
+      default: true
 
 state_schema:
-  message:
+  chat:
     type: object
     properties:
       investigators:
@@ -44,9 +47,3 @@ state_schema:
               type: string
             clues:
               type: string
-
-github_path: 'https://github.com/zorro-crypto/Yukimof_stage_C'
-
-
-extension_id: 'yukimof-stage-c-285a9fc0fadb'
-
