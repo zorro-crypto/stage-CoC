@@ -25,7 +25,7 @@ type ConfigType = {
 };
 
 type InitStateType = null;
-type ChatStateType = null;
+type ChatStateType = MessageStateType;
 
 const storageKey = "chub-coc-stage-state-v1";
 
@@ -121,9 +121,10 @@ function buildStageDirections(state: MessageStateType): string {
 type CocKeeperProps = {
   initialState: MessageStateType;
   onChange: (state: MessageStateType) => void;
+  onSave: (state: MessageStateType) => void;
 };
 
-function CocKeeper({initialState, onChange}: CocKeeperProps): ReactElement {
+function CocKeeper({initialState, onChange, onSave}: CocKeeperProps): ReactElement {
   const [state, setState] = useState<MessageStateType>(initialState);
   const investigators = state.investigators;
 
@@ -140,6 +141,7 @@ function CocKeeper({initialState, onChange}: CocKeeperProps): ReactElement {
     const normalized = normalizeState(nextState);
     setState(normalized);
     onChange(normalized);
+    onSave(normalized);
     saveStoredState(normalized);
   }
 
@@ -337,7 +339,7 @@ export class Stage extends StageBase<InitStateType, ChatStateType, MessageStateT
   constructor(data: InitialData<InitStateType, ChatStateType, MessageStateType, ConfigType>) {
     super(data);
     this.config = data.config ?? {};
-    this.myInternalState = normalizeState(data.messageState ?? loadStoredState());
+    this.myInternalState = normalizeState(data.chatState ?? data.messageState ?? loadStoredState());
   }
 
   async load(): Promise<Partial<LoadResponse<InitStateType, ChatStateType, MessageStateType>>> {
@@ -346,10 +348,15 @@ export class Stage extends StageBase<InitStateType, ChatStateType, MessageStateT
       error: null,
       initState: null,
       chatState: null,
+      messageState: null,
     };
   }
 
   async setState(state: MessageStateType): Promise<void> {
+    if (state == null) {
+      return;
+    }
+
     this.myInternalState = normalizeState(state);
     saveStoredState(this.myInternalState);
   }
@@ -370,8 +377,17 @@ export class Stage extends StageBase<InitStateType, ChatStateType, MessageStateT
         onChange={(state) => {
           this.myInternalState = state;
         }}
+        onSave={(state) => {
+          this.saveChatState(state);
+        }}
       />
     );
+  }
+
+  private saveChatState(state: MessageStateType): void {
+    this.messenger.updateChatState(state).catch((error) => {
+      console.warn("Failed to save CoC stage chat state.", error);
+    });
   }
 
   private persist(sendStatusToPrompt: boolean): Partial<StageResponse<ChatStateType, MessageStateType>> {
@@ -379,7 +395,7 @@ export class Stage extends StageBase<InitStateType, ChatStateType, MessageStateT
 
     return {
       stageDirections: sendStatusToPrompt ? buildStageDirections(this.myInternalState) : null,
-      messageState: this.myInternalState,
+      messageState: null,
       modifiedMessage: null,
       systemMessage: null,
       error: null,
