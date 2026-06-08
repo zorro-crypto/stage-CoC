@@ -47,3 +47,6 @@ state_schema:
               type: string
             clues:
               type: string
+
+github_path: 'https://github.com/zorro-crypto/Yukimof_stage_C'
+
