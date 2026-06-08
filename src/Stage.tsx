@@ -1,33 +1,23 @@
-import {ReactElement} from "react";
-import {StageBase, StageResponse, InitialData, Message} from "@chub-ai/stages-ts";
+import {ReactElement, useMemo, useState} from "react";
+import {InitialData, Message, StageBase, StageResponse} from "@chub-ai/stages-ts";
 import {LoadResponse} from "@chub-ai/stages-ts/dist/types/load";
 
 type Investigator = {
   id: string;
   name: string;
-
   hp: number;
-  hpMax: number;
-
   mp: number;
-  mpMax: number;
-
   san: number;
-  sanMax: number;
-
   luck: number;
-
+  majorWound: boolean;
   temporaryInsanity: string;
   indefiniteInsanity: string;
-  majorWound: boolean;
-
-  inventoryText: string;
-  cluesText: string;
+  inventory: string;
+  clues: string;
 };
 
 type MessageStateType = {
   investigators: Investigator[];
-  activeInvestigatorId: string | null;
 };
 
 type ConfigType = {
@@ -37,143 +27,320 @@ type ConfigType = {
 type InitStateType = null;
 type ChatStateType = null;
 
-const defaultInvestigator: Investigator = {
-  id: "investigator-1",
-  name: "Investigator",
+const storageKey = "chub-coc-stage-state-v1";
 
+const createInvestigator = (name = ""): Investigator => ({
+  id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  name,
   hp: 10,
-  hpMax: 10,
-
   mp: 10,
-  mpMax: 10,
-
   san: 50,
-  sanMax: 99,
-
   luck: 50,
-
+  majorWound: false,
   temporaryInsanity: "",
   indefiniteInsanity: "",
-  majorWound: false,
+  inventory: "",
+  clues: "",
+});
 
-  inventoryText: "",
-  cluesText: "",
-};
+const defaultState = (): MessageStateType => ({
+  investigators: [createInvestigator("探索者 1")],
+});
 
-const defaultState: MessageStateType = {
-  investigators: [defaultInvestigator],
-  activeInvestigatorId: "investigator-1",
-};
+function normalizeNumber(value: number): number {
+  if (!Number.isFinite(value) || Number.isNaN(value)) {
+    return 0;
+  }
 
-function clampNumber(value: number, min: number, max?: number): number {
-  if (Number.isNaN(value)) return min;
-  if (max == null) return Math.max(min, value);
-  return Math.min(max, Math.max(min, value));
+  return Math.max(0, Math.round(value));
+}
+
+function normalizeState(state: MessageStateType | null | undefined): MessageStateType {
+  if (!state?.investigators?.length) {
+    return defaultState();
+  }
+
+  return {
+    investigators: state.investigators.map((investigator, index) => ({
+      ...createInvestigator(`探索者 ${index + 1}`),
+      ...investigator,
+      hp: normalizeNumber(investigator.hp),
+      mp: normalizeNumber(investigator.mp),
+      san: normalizeNumber(investigator.san),
+      luck: normalizeNumber(investigator.luck),
+      majorWound: Boolean(investigator.majorWound),
+      temporaryInsanity: investigator.temporaryInsanity ?? "",
+      indefiniteInsanity: investigator.indefiniteInsanity ?? "",
+      inventory: investigator.inventory ?? "",
+      clues: investigator.clues ?? "",
+    })),
+  };
+}
+
+function loadStoredState(): MessageStateType | null {
+  try {
+    const stored = window.localStorage.getItem(storageKey);
+    return stored == null ? null : normalizeState(JSON.parse(stored));
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredState(state: MessageStateType): void {
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(state));
+  } catch {
+    // Chub also stores message state when a chat turn is sent.
+  }
 }
 
 function buildStageDirections(state: MessageStateType): string {
-  const active =
-    state.investigators.find((i) => i.id === state.activeInvestigatorId) ??
-    state.investigators[0];
+  const lines = state.investigators.map((investigator) => {
+    return [
+      `名前: ${investigator.name || "未設定"}`,
+      `HP: ${investigator.hp}`,
+      `MP: ${investigator.mp}`,
+      `SAN: ${investigator.san}`,
+      `幸運: ${investigator.luck}`,
+      `重傷: ${investigator.majorWound ? "あり" : "なし"}`,
+      `一時的狂気: ${investigator.temporaryInsanity || "なし"}`,
+      `不定の狂気: ${investigator.indefiniteInsanity || "なし"}`,
+      `所持品: ${investigator.inventory || "なし"}`,
+      `手掛かり: ${investigator.clues || "なし"}`,
+    ].join("\n");
+  });
 
-  if (!active) {
-    return "";
-  }
-
-  return `
-[CoC Status Board]
-
-Active investigator:
-${active.name}
-
-Current values:
-HP: ${active.hp}/${active.hpMax}
-MP: ${active.mp}/${active.mpMax}
-SAN: ${active.san}/${active.sanMax}
-Luck: ${active.luck}
-Major wound: ${active.majorWound ? "yes" : "no"}
-Temporary insanity: ${active.temporaryInsanity || "none"}
-Indefinite insanity: ${active.indefiniteInsanity || "none"}
-
-Inventory:
-${active.inventoryText || "none"}
-
-Clues:
-${active.cluesText || "none"}
-
-Rules for the assistant:
-- Treat these values as user-managed reference data.
-- Do not change HP, MP, SAN, Luck, inventory, or clues unless the user explicitly says they changed.
-- Do not roll dice.
-- Do not decide success or failure unless the user provides the result.
-`;
+  return [
+    "[CoC 探索者管理]",
+    "以下はユーザーが手動管理している探索者情報です。ユーザーが明示しない限り、数値やメモを勝手に変更したものとして扱わないでください。",
+    "",
+    lines.join("\n\n"),
+  ].join("\n");
 }
 
-function NumberInput(props: {
-  label: string;
-  value: number;
-  max?: number;
-  onChange: (value: number) => void;
-}) {
-  const { label, value, max, onChange } = props;
+type CocKeeperProps = {
+  initialState: MessageStateType;
+  onChange: (state: MessageStateType) => void;
+};
+
+function CocKeeper({initialState, onChange}: CocKeeperProps): ReactElement {
+  const [state, setState] = useState<MessageStateType>(initialState);
+  const investigators = state.investigators;
+
+  const summary = useMemo(() => {
+    const wounded = investigators.filter((investigator) => investigator.majorWound).length;
+    const clueLines = investigators.reduce((count, investigator) => {
+      return count + investigator.clues.split("\n").filter((line) => line.trim() !== "").length;
+    }, 0);
+
+    return {wounded, clueLines};
+  }, [investigators]);
+
+  function commit(nextState: MessageStateType): void {
+    const normalized = normalizeState(nextState);
+    setState(normalized);
+    onChange(normalized);
+    saveStoredState(normalized);
+  }
+
+  function updateInvestigator(id: string, update: Partial<Investigator>): void {
+    commit({
+      investigators: investigators.map((investigator) => {
+        if (investigator.id !== id) {
+          return investigator;
+        }
+
+        return {...investigator, ...update};
+      }),
+    });
+  }
+
+  function changeValue(id: string, key: "hp" | "mp" | "san" | "luck", amount: number): void {
+    const target = investigators.find((investigator) => investigator.id === id);
+    if (target == null) {
+      return;
+    }
+
+    updateInvestigator(id, {[key]: normalizeNumber(target[key] + amount)});
+  }
+
+  function addInvestigator(): void {
+    commit({
+      investigators: [...investigators, createInvestigator(`探索者 ${investigators.length + 1}`)],
+    });
+  }
+
+  function removeInvestigator(id: string): void {
+    if (investigators.length <= 1) {
+      return;
+    }
+
+    commit({
+      investigators: investigators.filter((investigator) => investigator.id !== id),
+    });
+  }
 
   return (
-    <div style={styles.statRow}>
-      <label style={styles.statLabel}>{label}</label>
+    <main className="coc-stage">
+      <header className="coc-stage__header">
+        <div>
+          <p className="coc-stage__eyebrow">Call of Cthulhu</p>
+          <h1>探索者管理</h1>
+        </div>
+        <button className="coc-button coc-button--primary" onClick={addInvestigator} type="button">
+          + 探索者
+        </button>
+      </header>
 
-      <button
-        style={styles.smallButton}
-        onClick={() => onChange(clampNumber(value - 1, 0, max))}
-      >
-        -
-      </button>
+      <section className="coc-summary" aria-label="概要">
+        <span>{investigators.length}人</span>
+        <span>重傷 {summary.wounded}</span>
+        <span>手掛かり {summary.clueLines}</span>
+      </section>
 
-      <input
-        style={styles.numberInput}
-        type="number"
-        value={value}
-        onChange={(e) => onChange(clampNumber(Number(e.target.value), 0, max))}
-      />
+      <section className="coc-list" aria-label="探索者一覧">
+        {investigators.map((investigator) => (
+          <article className="investigator" key={investigator.id}>
+            <div className="investigator__top">
+              <input
+                aria-label="探索者名"
+                className="investigator__name"
+                onChange={(event) => updateInvestigator(investigator.id, {name: event.target.value})}
+                placeholder="探索者名"
+                type="text"
+                value={investigator.name}
+              />
+              <button
+                className="coc-button coc-button--ghost"
+                disabled={investigators.length <= 1}
+                onClick={() => removeInvestigator(investigator.id)}
+                type="button"
+              >
+                削除
+              </button>
+            </div>
 
-      {max != null && <span style={styles.slash}>/</span>}
+            <div className="stat-grid">
+              <StatControl
+                label="HP"
+                onChange={(value) => updateInvestigator(investigator.id, {hp: value})}
+                onStep={(amount) => changeValue(investigator.id, "hp", amount)}
+                value={investigator.hp}
+              />
+              <StatControl
+                label="MP"
+                onChange={(value) => updateInvestigator(investigator.id, {mp: value})}
+                onStep={(amount) => changeValue(investigator.id, "mp", amount)}
+                value={investigator.mp}
+              />
+              <StatControl
+                label="SAN"
+                onChange={(value) => updateInvestigator(investigator.id, {san: value})}
+                onStep={(amount) => changeValue(investigator.id, "san", amount)}
+                value={investigator.san}
+              />
+              <StatControl
+                label="幸運"
+                onChange={(value) => updateInvestigator(investigator.id, {luck: value})}
+                onStep={(amount) => changeValue(investigator.id, "luck", amount)}
+                value={investigator.luck}
+              />
+            </div>
 
-      {max != null && (
+            <label className="major-wound">
+              <input
+                checked={investigator.majorWound}
+                onChange={(event) => updateInvestigator(investigator.id, {majorWound: event.target.checked})}
+                type="checkbox"
+              />
+              <span>重傷</span>
+            </label>
+
+            <div className="memo-grid">
+              <MemoField
+                label="一時的狂気"
+                onChange={(temporaryInsanity) => updateInvestigator(investigator.id, {temporaryInsanity})}
+                value={investigator.temporaryInsanity}
+              />
+              <MemoField
+                label="不定の狂気"
+                onChange={(indefiniteInsanity) => updateInvestigator(investigator.id, {indefiniteInsanity})}
+                value={investigator.indefiniteInsanity}
+              />
+              <MemoField
+                label="所持品"
+                onChange={(inventory) => updateInvestigator(investigator.id, {inventory})}
+                value={investigator.inventory}
+              />
+              <MemoField
+                label="手掛かり"
+                onChange={(clues) => updateInvestigator(investigator.id, {clues})}
+                value={investigator.clues}
+              />
+            </div>
+          </article>
+        ))}
+      </section>
+    </main>
+  );
+}
+
+type StatControlProps = {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  onStep: (amount: number) => void;
+};
+
+function StatControl({label, value, onChange, onStep}: StatControlProps): ReactElement {
+  return (
+    <div className="stat-control">
+      <span className="stat-control__label">{label}</span>
+      <div className="stat-control__row">
+        <button aria-label={`${label}を1減らす`} onClick={() => onStep(-1)} type="button">
+          -
+        </button>
         <input
-          style={styles.numberInput}
+          aria-label={label}
+          inputMode="numeric"
+          onChange={(event) => onChange(normalizeNumber(Number(event.target.value)))}
           type="number"
-          value={max}
-          onChange={() => {
-            // max側はここでは変更しない。
-            // 必要なら次版で max 編集も追加する。
-          }}
-          readOnly
+          value={value}
         />
-      )}
-
-      <button
-        style={styles.smallButton}
-        onClick={() => onChange(clampNumber(value + 1, 0, max))}
-      >
-        +
-      </button>
+        <button aria-label={`${label}を1増やす`} onClick={() => onStep(1)} type="button">
+          +
+        </button>
+      </div>
     </div>
   );
 }
 
-export class Stage extends StageBase {
-  state: MessageStateType;
-  config: ConfigType;
+type MemoFieldProps = {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+};
 
-  constructor(
-    data: InitialData<InitStateType, ChatStateType, MessageStateType, ConfigType>
-  ) {
+function MemoField({label, value, onChange}: MemoFieldProps): ReactElement {
+  return (
+    <label className="memo-field">
+      <span>{label}</span>
+      <textarea onChange={(event) => onChange(event.target.value)} rows={3} value={value} />
+    </label>
+  );
+}
+
+export class Stage extends StageBase<InitStateType, ChatStateType, MessageStateType, ConfigType> {
+  private myInternalState: MessageStateType;
+  private config: ConfigType;
+
+  constructor(data: InitialData<InitStateType, ChatStateType, MessageStateType, ConfigType>) {
     super(data);
-
     this.config = data.config ?? {};
-    this.state = data.messageState ?? defaultState;
+    this.myInternalState = normalizeState(data.messageState ?? loadStoredState());
   }
 
-  async load(): Promise<LoadResponse<InitStateType, ChatStateType>> {
+  async load(): Promise<Partial<LoadResponse<InitStateType, ChatStateType, MessageStateType>>> {
     return {
       success: true,
       error: null,
@@ -183,288 +350,40 @@ export class Stage extends StageBase {
   }
 
   async setState(state: MessageStateType): Promise<void> {
-    if (state != null) {
-      this.state = {
-        ...this.state,
-        ...state,
-      };
-    }
+    this.myInternalState = normalizeState(state);
+    saveStoredState(this.myInternalState);
   }
 
-  async beforePrompt(
-    _userMessage: Message
-  ): Promise<StageResponse<ChatStateType, MessageStateType>> {
-    const sendStatusToPrompt = this.config.sendStatusToPrompt ?? true;
-
-    return {
-      stageDirections: sendStatusToPrompt
-        ? buildStageDirections(this.state)
-        : null,
-      messageState: this.state,
-      modifiedMessage: null,
-      systemMessage: null,
-      error: null,
-      chatState: null,
-    };
+  async beforePrompt(_userMessage: Message): Promise<Partial<StageResponse<ChatStateType, MessageStateType>>> {
+    return this.persist(this.config.sendStatusToPrompt ?? true);
   }
 
-  async afterResponse(
-    _botMessage: Message
-  ): Promise<StageResponse<ChatStateType, MessageStateType>> {
-    return {
-      stageDirections: null,
-      messageState: this.state,
-      modifiedMessage: null,
-      systemMessage: null,
-      error: null,
-      chatState: null,
-    };
-  }
-
-  updateActiveInvestigator(patch: Partial<Investigator>) {
-    const activeId = this.state.activeInvestigatorId;
-
-    this.state = {
-      ...this.state,
-      investigators: this.state.investigators.map((inv) =>
-        inv.id === activeId ? { ...inv, ...patch } : inv
-      ),
-    };
+  async afterResponse(_botMessage: Message): Promise<Partial<StageResponse<ChatStateType, MessageStateType>>> {
+    return this.persist(false);
   }
 
   render(): ReactElement {
-    const active =
-      this.state.investigators.find(
-        (i) => i.id === this.state.activeInvestigatorId
-      ) ?? this.state.investigators[0];
-
-    if (!active) {
-      return (
-        <div style={styles.container}>
-          <h2 style={styles.title}>CoC Status Board</h2>
-          <p>No investigator.</p>
-        </div>
-      );
-    }
-
     return (
-      <div style={styles.container}>
-        <h2 style={styles.title}>CoC Status Board</h2>
-
-        <section style={styles.card}>
-          <label style={styles.label}>探索者名</label>
-          <input
-            style={styles.textInput}
-            value={active.name}
-            onChange={(e) =>
-              this.updateActiveInvestigator({ name: e.target.value })
-            }
-          />
-        </section>
-
-        <section style={styles.card}>
-          <h3 style={styles.heading}>数値</h3>
-
-          <NumberInput
-            label="HP"
-            value={active.hp}
-            max={active.hpMax}
-            onChange={(hp) => this.updateActiveInvestigator({ hp })}
-          />
-
-          <NumberInput
-            label="MP"
-            value={active.mp}
-            max={active.mpMax}
-            onChange={(mp) => this.updateActiveInvestigator({ mp })}
-          />
-
-          <NumberInput
-            label="SAN"
-            value={active.san}
-            max={active.sanMax}
-            onChange={(san) => this.updateActiveInvestigator({ san })}
-          />
-
-          <NumberInput
-            label="幸運"
-            value={active.luck}
-            onChange={(luck) => this.updateActiveInvestigator({ luck })}
-          />
-        </section>
-
-        <section style={styles.card}>
-          <h3 style={styles.heading}>状態</h3>
-
-          <label style={styles.checkboxRow}>
-            <input
-              type="checkbox"
-              checked={active.majorWound}
-              onChange={(e) =>
-                this.updateActiveInvestigator({
-                  majorWound: e.target.checked,
-                })
-              }
-            />
-            重傷
-          </label>
-
-          <label style={styles.label}>一時的狂気</label>
-          <input
-            style={styles.textInput}
-            value={active.temporaryInsanity}
-            onChange={(e) =>
-              this.updateActiveInvestigator({
-                temporaryInsanity: e.target.value,
-              })
-            }
-            placeholder="なし"
-          />
-
-          <label style={styles.label}>不定の狂気</label>
-          <input
-            style={styles.textInput}
-            value={active.indefiniteInsanity}
-            onChange={(e) =>
-              this.updateActiveInvestigator({
-                indefiniteInsanity: e.target.value,
-              })
-            }
-            placeholder="なし"
-          />
-        </section>
-
-        <section style={styles.card}>
-          <h3 style={styles.heading}>所持品</h3>
-          <textarea
-            style={styles.textArea}
-            value={active.inventoryText}
-            onChange={(e) =>
-              this.updateActiveInvestigator({
-                inventoryText: e.target.value,
-              })
-            }
-            placeholder={"懐中電灯\n財布\n鍵"}
-          />
-        </section>
-
-        <section style={styles.card}>
-          <h3 style={styles.heading}>手掛かり</h3>
-          <textarea
-            style={styles.textArea}
-            value={active.cluesText}
-            onChange={(e) =>
-              this.updateActiveInvestigator({
-                cluesText: e.target.value,
-              })
-            }
-            placeholder={"古い新聞記事\n海藻臭い泥"}
-          />
-        </section>
-      </div>
+      <CocKeeper
+        key={JSON.stringify(this.myInternalState)}
+        initialState={this.myInternalState}
+        onChange={(state) => {
+          this.myInternalState = state;
+        }}
+      />
     );
   }
+
+  private persist(sendStatusToPrompt: boolean): Partial<StageResponse<ChatStateType, MessageStateType>> {
+    saveStoredState(this.myInternalState);
+
+    return {
+      stageDirections: sendStatusToPrompt ? buildStageDirections(this.myInternalState) : null,
+      messageState: this.myInternalState,
+      modifiedMessage: null,
+      systemMessage: null,
+      error: null,
+      chatState: null,
+    };
+  }
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    boxSizing: "border-box",
-    width: "100%",
-    minHeight: "100%",
-    padding: "12px",
-    fontFamily:
-      'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-    color: "#e8e0d4",
-    background: "#171313",
-  },
-
-  title: {
-    margin: "0 0 12px",
-    fontSize: "20px",
-    letterSpacing: "0.04em",
-  },
-
-  card: {
-    marginBottom: "12px",
-    padding: "10px",
-    border: "1px solid rgba(232, 224, 212, 0.18)",
-    borderRadius: "10px",
-    background: "rgba(255, 255, 255, 0.04)",
-  },
-
-  heading: {
-    margin: "0 0 8px",
-    fontSize: "15px",
-  },
-
-  label: {
-    display: "block",
-    margin: "8px 0 4px",
-    fontSize: "12px",
-    opacity: 0.85,
-  },
-
-  statRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    marginBottom: "8px",
-  },
-
-  statLabel: {
-    width: "42px",
-    fontWeight: 700,
-  },
-
-  smallButton: {
-    width: "28px",
-    height: "28px",
-    borderRadius: "8px",
-    border: "1px solid rgba(232, 224, 212, 0.25)",
-    background: "rgba(255, 255, 255, 0.08)",
-    color: "#e8e0d4",
-    cursor: "pointer",
-  },
-
-  numberInput: {
-    width: "54px",
-    padding: "5px",
-    borderRadius: "8px",
-    border: "1px solid rgba(232, 224, 212, 0.25)",
-    background: "#221c1c",
-    color: "#e8e0d4",
-  },
-
-  slash: {
-    opacity: 0.7,
-  },
-
-  textInput: {
-    boxSizing: "border-box",
-    width: "100%",
-    padding: "7px",
-    borderRadius: "8px",
-    border: "1px solid rgba(232, 224, 212, 0.25)",
-    background: "#221c1c",
-    color: "#e8e0d4",
-  },
-
-  textArea: {
-    boxSizing: "border-box",
-    width: "100%",
-    minHeight: "84px",
-    padding: "7px",
-    borderRadius: "8px",
-    border: "1px solid rgba(232, 224, 212, 0.25)",
-    background: "#221c1c",
-    color: "#e8e0d4",
-    resize: "vertical",
-  },
-
-  checkboxRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    marginBottom: "8px",
-  },
-};
