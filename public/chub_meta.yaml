@@ -26,7 +26,15 @@
 #  - 'Admin'
 #  - 'Template'
 #  - 'Base'
-
+project_name: "CoC Status Board"
+tagline: "A simple manual status board for Call of Cthulhu chats."
+visibility: "PRIVATE"
+position: "ADJACENT"
+tags:
+  - Stage
+  - RPG
+  - CoC
+  - Status
 # The schema of any user-supplied config.
 # If your stage requires a configuration but has no
 #   defined schema, it won't work.
