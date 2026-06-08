@@ -2,204 +2,469 @@ import {ReactElement} from "react";
 import {StageBase, StageResponse, InitialData, Message} from "@chub-ai/stages-ts";
 import {LoadResponse} from "@chub-ai/stages-ts/dist/types/load";
 
-/***
- The type that this stage persists message-level state in.
- This is primarily for readability, and not enforced.
+type Investigator = {
+  id: string;
+  name: string;
 
- @description This type is saved in the database after each message,
-  which makes it ideal for storing things like positions and statuses,
-  but not for things like history, which is best managed ephemerally
-  in the internal state of the Stage class itself.
- ***/
-type MessageStateType = any;
+  hp: number;
+  hpMax: number;
 
-/***
- The type of the stage-specific configuration of this stage.
+  mp: number;
+  mpMax: number;
 
- @description This is for things you want people to be able to configure,
-  like background color.
- ***/
-type ConfigType = any;
+  san: number;
+  sanMax: number;
 
-/***
- The type that this stage persists chat initialization state in.
- If there is any 'constant once initialized' static state unique to a chat,
- like procedurally generated terrain that is only created ONCE and ONLY ONCE per chat,
- it belongs here.
- ***/
-type InitStateType = any;
+  luck: number;
 
-/***
- The type that this stage persists dynamic chat-level state in.
- This is for any state information unique to a chat,
-    that applies to ALL branches and paths such as clearing fog-of-war.
- It is usually unlikely you will need this, and if it is used for message-level
-    data like player health then it will enter an inconsistent state whenever
-    they change branches or jump nodes. Use MessageStateType for that.
- ***/
-type ChatStateType = any;
+  temporaryInsanity: string;
+  indefiniteInsanity: string;
+  majorWound: boolean;
 
-/***
- A simple example class that implements the interfaces necessary for a Stage.
- If you want to rename it, be sure to modify App.js as well.
- @link https://github.com/CharHubAI/chub-stages-ts/blob/main/src/types/stage.ts
- ***/
-export class Stage extends StageBase<InitStateType, ChatStateType, MessageStateType, ConfigType> {
+  inventoryText: string;
+  cluesText: string;
+};
 
-    /***
-     A very simple example internal state. Can be anything.
-     This is ephemeral in the sense that it isn't persisted to a database,
-     but exists as long as the instance does, i.e., the chat page is open.
-     ***/
-    myInternalState: {[key: string]: any};
+type MessageStateType = {
+  investigators: Investigator[];
+  activeInvestigatorId: string | null;
+};
 
-    constructor(data: InitialData<InitStateType, ChatStateType, MessageStateType, ConfigType>) {
-        /***
-         This is the first thing called in the stage,
-         to create an instance of it.
-         The definition of InitialData is at @link https://github.com/CharHubAI/chub-stages-ts/blob/main/src/types/initial.ts
-         Character at @link https://github.com/CharHubAI/chub-stages-ts/blob/main/src/types/character.ts
-         User at @link https://github.com/CharHubAI/chub-stages-ts/blob/main/src/types/user.ts
-         ***/
-        super(data);
-        const {
-            characters,         // @type:  { [key: string]: Character }
-            users,                  // @type:  { [key: string]: User}
-            config,                                 //  @type:  ConfigType
-            messageState,                           //  @type:  MessageStateType
-            environment,                     // @type: Environment (which is a string)
-            initState,                             // @type: null | InitStateType
-            chatState                              // @type: null | ChatStateType
-        } = data;
-        this.myInternalState = messageState != null ? messageState : {'someKey': 'someValue'};
-        this.myInternalState['numUsers'] = Object.keys(users).length;
-        this.myInternalState['numChars'] = Object.keys(characters).length;
-    }
+type ConfigType = {
+  sendStatusToPrompt?: boolean;
+};
 
-    async load(): Promise<Partial<LoadResponse<InitStateType, ChatStateType, MessageStateType>>> {
-        /***
-         This is called immediately after the constructor, in case there is some asynchronous code you need to
-         run on instantiation.
-         ***/
-        return {
-            /*** @type boolean @default null
-             @description The 'success' boolean returned should be false IFF (if and only if), some condition is met that means
-              the stage shouldn't be run at all and the iFrame can be closed/removed.
-              For example, if a stage displays expressions and no characters have an expression pack,
-              there is no reason to run the stage, so it would return false here. ***/
-            success: true,
-            /*** @type null | string @description an error message to show
-             briefly at the top of the screen, if any. ***/
-            error: null,
-            initState: null,
-            chatState: null,
-        };
-    }
+type InitStateType = null;
+type ChatStateType = null;
 
-    async setState(state: MessageStateType): Promise<void> {
-        /***
-         This can be called at any time, typically after a jump to a different place in the chat tree
-         or a swipe. Note how neither InitState nor ChatState are given here. They are not for
-         state that is affected by swiping.
-         ***/
-        if (state != null) {
-            this.myInternalState = {...this.myInternalState, ...state};
-        }
-    }
+const defaultInvestigator: Investigator = {
+  id: "investigator-1",
+  name: "Investigator",
 
-    async beforePrompt(userMessage: Message): Promise<Partial<StageResponse<ChatStateType, MessageStateType>>> {
-        /***
-         This is called after someone presses 'send', but before anything is sent to the LLM.
-         ***/
-        const {
-            content,            /*** @type: string
-             @description Just the last message about to be sent. ***/
-            anonymizedId,       /*** @type: string
-             @description An anonymized ID that is unique to this individual
-              in this chat, but NOT their Chub ID. ***/
-            isBot             /*** @type: boolean
-             @description Whether this is itself from another bot, ex. in a group chat. ***/
-        } = userMessage;
-        return {
-            /*** @type null | string @description A string to add to the
-             end of the final prompt sent to the LLM,
-             but that isn't persisted. ***/
-            stageDirections: null,
-            /*** @type MessageStateType | null @description the new state after the userMessage. ***/
-            messageState: {'someKey': this.myInternalState['someKey']},
-            /*** @type null | string @description If not null, the user's message itself is replaced
-             with this value, both in what's sent to the LLM and in the database. ***/
-            modifiedMessage: null,
-            /*** @type null | string @description A system message to append to the end of this message.
-             This is unique in that it shows up in the chat log and is sent to the LLM in subsequent messages,
-             but it's shown as coming from a system user and not any member of the chat. If you have things like
-             computed stat blocks that you want to show in the log, but don't want the LLM to start trying to
-             mimic/output them, they belong here. ***/
-            systemMessage: null,
-            /*** @type null | string @description an error message to show
-             briefly at the top of the screen, if any. ***/
-            error: null,
-            chatState: null,
-        };
-    }
+  hp: 10,
+  hpMax: 10,
 
-    async afterResponse(botMessage: Message): Promise<Partial<StageResponse<ChatStateType, MessageStateType>>> {
-        /***
-         This is called immediately after a response from the LLM.
-         ***/
-        const {
-            content,            /*** @type: string
-             @description The LLM's response. ***/
-            anonymizedId,       /*** @type: string
-             @description An anonymized ID that is unique to this individual
-              in this chat, but NOT their Chub ID. ***/
-            isBot             /*** @type: boolean
-             @description Whether this is from a bot, conceivably always true. ***/
-        } = botMessage;
-        return {
-            /*** @type null | string @description A string to add to the
-             end of the final prompt sent to the LLM,
-             but that isn't persisted. ***/
-            stageDirections: null,
-            /*** @type MessageStateType | null @description the new state after the botMessage. ***/
-            messageState: {'someKey': this.myInternalState['someKey']},
-            /*** @type null | string @description If not null, the bot's response itself is replaced
-             with this value, both in what's sent to the LLM subsequently and in the database. ***/
-            modifiedMessage: null,
-            /*** @type null | string @description an error message to show
-             briefly at the top of the screen, if any. ***/
-            error: null,
-            systemMessage: null,
-            chatState: null
-        };
-    }
+  mp: 10,
+  mpMax: 10,
 
+  san: 50,
+  sanMax: 99,
 
-    render(): ReactElement {
-        /***
-         There should be no "work" done here. Just returning the React element to display.
-         If you're unfamiliar with React and prefer video, I've heard good things about
-         @link https://scrimba.com/learn/learnreact but haven't personally watched/used it.
+  luck: 50,
 
-         For creating 3D and game components, react-three-fiber
-           @link https://docs.pmnd.rs/react-three-fiber/getting-started/introduction
-           and the associated ecosystem of libraries are quite good and intuitive.
+  temporaryInsanity: "",
+  indefiniteInsanity: "",
+  majorWound: false,
 
-         Cuberun is a good example of a game built with them.
-           @link https://github.com/akarlsten/cuberun (Source)
-           @link https://cuberun.adamkarlsten.com/ (Demo)
-         ***/
-        return <div style={{
-            width: '100vw',
-            height: '100vh',
-            display: 'grid',
-            alignItems: 'stretch'
-        }}>
-            <div>Hello World! I'm an empty stage! With {this.myInternalState['someKey']}!</div>
-            <div>There is/are/were {this.myInternalState['numChars']} character(s)
-                and {this.myInternalState['numUsers']} human(s) here.
-            </div>
-        </div>;
-    }
+  inventoryText: "",
+  cluesText: "",
+};
 
+const defaultState: MessageStateType = {
+  investigators: [defaultInvestigator],
+  activeInvestigatorId: "investigator-1",
+};
+
+function clampNumber(value: number, min: number, max?: number): number {
+  if (Number.isNaN(value)) return min;
+  if (max == null) return Math.max(min, value);
+  return Math.min(max, Math.max(min, value));
 }
+
+function buildStageDirections(state: MessageStateType): string {
+  const active =
+    state.investigators.find((i) => i.id === state.activeInvestigatorId) ??
+    state.investigators[0];
+
+  if (!active) {
+    return "";
+  }
+
+  return `
+[CoC Status Board]
+
+Active investigator:
+${active.name}
+
+Current values:
+HP: ${active.hp}/${active.hpMax}
+MP: ${active.mp}/${active.mpMax}
+SAN: ${active.san}/${active.sanMax}
+Luck: ${active.luck}
+Major wound: ${active.majorWound ? "yes" : "no"}
+Temporary insanity: ${active.temporaryInsanity || "none"}
+Indefinite insanity: ${active.indefiniteInsanity || "none"}
+
+Inventory:
+${active.inventoryText || "none"}
+
+Clues:
+${active.cluesText || "none"}
+
+Rules for the assistant:
+- Treat these values as user-managed reference data.
+- Do not change HP, MP, SAN, Luck, inventory, or clues unless the user explicitly says they changed.
+- Do not roll dice.
+- Do not decide success or failure unless the user provides the result.
+`;
+}
+
+function NumberInput(props: {
+  label: string;
+  value: number;
+  max?: number;
+  onChange: (value: number) => void;
+}) {
+  const { label, value, max, onChange } = props;
+
+  return (
+    <div style={styles.statRow}>
+      <label style={styles.statLabel}>{label}</label>
+
+      <button
+        style={styles.smallButton}
+        onClick={() => onChange(clampNumber(value - 1, 0, max))}
+      >
+        -
+      </button>
+
+      <input
+        style={styles.numberInput}
+        type="number"
+        value={value}
+        onChange={(e) => onChange(clampNumber(Number(e.target.value), 0, max))}
+      />
+
+      {max != null && <span style={styles.slash}>/</span>}
+
+      {max != null && (
+        <input
+          style={styles.numberInput}
+          type="number"
+          value={max}
+          onChange={() => {
+            // max側はここでは変更しない。
+            // 必要なら次版で max 編集も追加する。
+          }}
+          readOnly
+        />
+      )}
+
+      <button
+        style={styles.smallButton}
+        onClick={() => onChange(clampNumber(value + 1, 0, max))}
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
+export class Stage extends StageBase {
+  state: MessageStateType;
+  config: ConfigType;
+
+  constructor(
+    data: InitialData<InitStateType, ChatStateType, MessageStateType, ConfigType>
+  ) {
+    super(data);
+
+    this.config = data.config ?? {};
+    this.state = data.messageState ?? defaultState;
+  }
+
+  async load(): Promise<LoadResponse<InitStateType, ChatStateType>> {
+    return {
+      success: true,
+      error: null,
+      initState: null,
+      chatState: null,
+    };
+  }
+
+  async setState(state: MessageStateType): Promise<void> {
+    if (state != null) {
+      this.state = {
+        ...this.state,
+        ...state,
+      };
+    }
+  }
+
+  async beforePrompt(
+    _userMessage: Message
+  ): Promise<StageResponse<ChatStateType, MessageStateType>> {
+    const sendStatusToPrompt = this.config.sendStatusToPrompt ?? true;
+
+    return {
+      stageDirections: sendStatusToPrompt
+        ? buildStageDirections(this.state)
+        : null,
+      messageState: this.state,
+      modifiedMessage: null,
+      systemMessage: null,
+      error: null,
+      chatState: null,
+    };
+  }
+
+  async afterResponse(
+    _botMessage: Message
+  ): Promise<StageResponse<ChatStateType, MessageStateType>> {
+    return {
+      stageDirections: null,
+      messageState: this.state,
+      modifiedMessage: null,
+      systemMessage: null,
+      error: null,
+      chatState: null,
+    };
+  }
+
+  updateActiveInvestigator(patch: Partial<Investigator>) {
+    const activeId = this.state.activeInvestigatorId;
+
+    this.state = {
+      ...this.state,
+      investigators: this.state.investigators.map((inv) =>
+        inv.id === activeId ? { ...inv, ...patch } : inv
+      ),
+    };
+  }
+
+  render(): ReactElement {
+    const active =
+      this.state.investigators.find(
+        (i) => i.id === this.state.activeInvestigatorId
+      ) ?? this.state.investigators[0];
+
+    if (!active) {
+      return (
+        <div style={styles.container}>
+          <h2 style={styles.title}>CoC Status Board</h2>
+          <p>No investigator.</p>
+        </div>
+      );
+    }
+
+    return (
+      <div style={styles.container}>
+        <h2 style={styles.title}>CoC Status Board</h2>
+
+        <section style={styles.card}>
+          <label style={styles.label}>探索者名</label>
+          <input
+            style={styles.textInput}
+            value={active.name}
+            onChange={(e) =>
+              this.updateActiveInvestigator({ name: e.target.value })
+            }
+          />
+        </section>
+
+        <section style={styles.card}>
+          <h3 style={styles.heading}>数値</h3>
+
+          <NumberInput
+            label="HP"
+            value={active.hp}
+            max={active.hpMax}
+            onChange={(hp) => this.updateActiveInvestigator({ hp })}
+          />
+
+          <NumberInput
+            label="MP"
+            value={active.mp}
+            max={active.mpMax}
+            onChange={(mp) => this.updateActiveInvestigator({ mp })}
+          />
+
+          <NumberInput
+            label="SAN"
+            value={active.san}
+            max={active.sanMax}
+            onChange={(san) => this.updateActiveInvestigator({ san })}
+          />
+
+          <NumberInput
+            label="幸運"
+            value={active.luck}
+            onChange={(luck) => this.updateActiveInvestigator({ luck })}
+          />
+        </section>
+
+        <section style={styles.card}>
+          <h3 style={styles.heading}>状態</h3>
+
+          <label style={styles.checkboxRow}>
+            <input
+              type="checkbox"
+              checked={active.majorWound}
+              onChange={(e) =>
+                this.updateActiveInvestigator({
+                  majorWound: e.target.checked,
+                })
+              }
+            />
+            重傷
+          </label>
+
+          <label style={styles.label}>一時的狂気</label>
+          <input
+            style={styles.textInput}
+            value={active.temporaryInsanity}
+            onChange={(e) =>
+              this.updateActiveInvestigator({
+                temporaryInsanity: e.target.value,
+              })
+            }
+            placeholder="なし"
+          />
+
+          <label style={styles.label}>不定の狂気</label>
+          <input
+            style={styles.textInput}
+            value={active.indefiniteInsanity}
+            onChange={(e) =>
+              this.updateActiveInvestigator({
+                indefiniteInsanity: e.target.value,
+              })
+            }
+            placeholder="なし"
+          />
+        </section>
+
+        <section style={styles.card}>
+          <h3 style={styles.heading}>所持品</h3>
+          <textarea
+            style={styles.textArea}
+            value={active.inventoryText}
+            onChange={(e) =>
+              this.updateActiveInvestigator({
+                inventoryText: e.target.value,
+              })
+            }
+            placeholder={"懐中電灯\n財布\n鍵"}
+          />
+        </section>
+
+        <section style={styles.card}>
+          <h3 style={styles.heading}>手掛かり</h3>
+          <textarea
+            style={styles.textArea}
+            value={active.cluesText}
+            onChange={(e) =>
+              this.updateActiveInvestigator({
+                cluesText: e.target.value,
+              })
+            }
+            placeholder={"古い新聞記事\n海藻臭い泥"}
+          />
+        </section>
+      </div>
+    );
+  }
+}
+
+const styles: Record<string, React.CSSProperties> = {
+  container: {
+    boxSizing: "border-box",
+    width: "100%",
+    minHeight: "100%",
+    padding: "12px",
+    fontFamily:
+      'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    color: "#e8e0d4",
+    background: "#171313",
+  },
+
+  title: {
+    margin: "0 0 12px",
+    fontSize: "20px",
+    letterSpacing: "0.04em",
+  },
+
+  card: {
+    marginBottom: "12px",
+    padding: "10px",
+    border: "1px solid rgba(232, 224, 212, 0.18)",
+    borderRadius: "10px",
+    background: "rgba(255, 255, 255, 0.04)",
+  },
+
+  heading: {
+    margin: "0 0 8px",
+    fontSize: "15px",
+  },
+
+  label: {
+    display: "block",
+    margin: "8px 0 4px",
+    fontSize: "12px",
+    opacity: 0.85,
+  },
+
+  statRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    marginBottom: "8px",
+  },
+
+  statLabel: {
+    width: "42px",
+    fontWeight: 700,
+  },
+
+  smallButton: {
+    width: "28px",
+    height: "28px",
+    borderRadius: "8px",
+    border: "1px solid rgba(232, 224, 212, 0.25)",
+    background: "rgba(255, 255, 255, 0.08)",
+    color: "#e8e0d4",
+    cursor: "pointer",
+  },
+
+  numberInput: {
+    width: "54px",
+    padding: "5px",
+    borderRadius: "8px",
+    border: "1px solid rgba(232, 224, 212, 0.25)",
+    background: "#221c1c",
+    color: "#e8e0d4",
+  },
+
+  slash: {
+    opacity: 0.7,
+  },
+
+  textInput: {
+    boxSizing: "border-box",
+    width: "100%",
+    padding: "7px",
+    borderRadius: "8px",
+    border: "1px solid rgba(232, 224, 212, 0.25)",
+    background: "#221c1c",
+    color: "#e8e0d4",
+  },
+
+  textArea: {
+    boxSizing: "border-box",
+    width: "100%",
+    minHeight: "84px",
+    padding: "7px",
+    borderRadius: "8px",
+    border: "1px solid rgba(232, 224, 212, 0.25)",
+    background: "#221c1c",
+    color: "#e8e0d4",
+    resize: "vertical",
+  },
+
+  checkboxRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    marginBottom: "8px",
+  },
+};
