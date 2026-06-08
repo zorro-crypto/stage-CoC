@@ -95,6 +95,36 @@ button:disabled {
   color: #6b2325;
 }
 
+.save-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid #c8d0c2;
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+}
+
+.save-bar__status {
+  color: #2f3a31;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.save-bar__status--dirty {
+  color: #7a2f13;
+}
+
+.save-bar__actions {
+  display: flex;
+  gap: 8px;
+}
+
 .coc-summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

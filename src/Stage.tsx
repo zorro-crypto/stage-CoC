@@ -1,4 +1,4 @@
-import {ReactElement, useMemo, useState} from "react";
+import {ReactElement, useEffect, useMemo, useState} from "react";
 import {InitialData, Message, StageBase, StageResponse} from "@chub-ai/stages-ts";
 import {LoadResponse} from "@chub-ai/stages-ts/dist/types/load";
 
@@ -16,7 +16,7 @@ type Investigator = {
   clues: string;
 };
 
-type MessageStateType = {
+type StageState = {
   investigators: Investigator[];
 };
 
@@ -25,9 +25,14 @@ type ConfigType = {
 };
 
 type InitStateType = null;
-type ChatStateType = MessageStateType;
+type ChatStateType = null;
+type MessageStateType = StageState;
 
-const storageKey = "chub-coc-stage-state-v1";
+const storageKey = "chub-coc-stage-state-v2";
+const oldStorageKey = "chub-coc-stage-state-v1";
+const databaseName = "chub-coc-stage-storage";
+const storeName = "stage-state";
+const databaseVersion = 1;
 
 const createInvestigator = (name = ""): Investigator => ({
   id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -43,19 +48,20 @@ const createInvestigator = (name = ""): Investigator => ({
   clues: "",
 });
 
-const defaultState = (): MessageStateType => ({
+const defaultState = (): StageState => ({
   investigators: [createInvestigator("探索者 1")],
 });
 
-function normalizeNumber(value: number): number {
-  if (!Number.isFinite(value) || Number.isNaN(value)) {
+function normalizeNumber(value: unknown): number {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue) || Number.isNaN(numberValue)) {
     return 0;
   }
 
-  return Math.max(0, Math.round(value));
+  return Math.max(0, Math.round(numberValue));
 }
 
-function normalizeState(state: MessageStateType | null | undefined): MessageStateType {
+function normalizeState(state: Partial<StageState> | null | undefined): StageState {
   if (!state?.investigators?.length) {
     return defaultState();
   }
@@ -77,24 +83,95 @@ function normalizeState(state: MessageStateType | null | undefined): MessageStat
   };
 }
 
-function loadStoredState(): MessageStateType | null {
+function loadLocalState(): StageState | null {
   try {
-    const stored = window.localStorage.getItem(storageKey);
+    const stored = window.localStorage.getItem(storageKey) ?? window.localStorage.getItem(oldStorageKey);
     return stored == null ? null : normalizeState(JSON.parse(stored));
   } catch {
     return null;
   }
 }
 
-function saveStoredState(state: MessageStateType): void {
+function requestPersistentStorage(): void {
+  navigator.storage?.persist?.().catch(() => {
+    // Persistence is best-effort and may be unavailable in sandboxed browsers.
+  });
+}
+
+function openStorageDatabase(): Promise<IDBDatabase | null> {
+  if (!("indexedDB" in window)) {
+    return Promise.resolve(null);
+  }
+
+  return new Promise((resolve) => {
+    const request = window.indexedDB.open(databaseName, databaseVersion);
+
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(storeName)) {
+        database.createObjectStore(storeName);
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+  });
+}
+
+async function loadIndexedState(): Promise<StageState | null> {
+  const database = await openStorageDatabase();
+  if (database == null) {
+    return null;
+  }
+
+  return new Promise((resolve) => {
+    const transaction = database.transaction(storeName, "readonly");
+    const store = transaction.objectStore(storeName);
+    const request = store.get(storageKey);
+
+    request.onsuccess = () => resolve(request.result == null ? null : normalizeState(request.result));
+    request.onerror = () => resolve(null);
+    transaction.oncomplete = () => database.close();
+  });
+}
+
+async function saveIndexedState(state: StageState): Promise<void> {
+  const database = await openStorageDatabase();
+  if (database == null) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    const transaction = database.transaction(storeName, "readwrite");
+    const store = transaction.objectStore(storeName);
+    store.put(state, storageKey);
+
+    transaction.oncomplete = () => {
+      database.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      database.close();
+      resolve();
+    };
+  });
+}
+
+function saveStorageState(state: StageState): void {
+  requestPersistentStorage();
+
   try {
     window.localStorage.setItem(storageKey, JSON.stringify(state));
   } catch {
-    // Chub also stores message state when a chat turn is sent.
+    // IndexedDB is used as the main fallback when localStorage is unavailable.
   }
+
+  saveIndexedState(state).catch((error) => {
+    console.warn("Failed to save CoC stage data to IndexedDB.", error);
+  });
 }
 
-function buildStageDirections(state: MessageStateType): string {
+function buildStageDirections(state: StageState): string {
   const lines = state.investigators.map((investigator) => {
     return [
       `名前: ${investigator.name || "未設定"}`,
@@ -112,21 +189,43 @@ function buildStageDirections(state: MessageStateType): string {
 
   return [
     "[CoC 探索者管理]",
-    "以下はユーザーが手動管理している探索者情報です。ユーザーが明示しない限り、数値やメモを勝手に変更したものとして扱わないでください。",
+    "以下はユーザーが保存ボタンで保存した探索者情報です。未保存の編集内容は含まれていません。ユーザーが明示しない限り、数値やメモを勝手に変更したものとして扱わないでください。",
     "",
     lines.join("\n\n"),
   ].join("\n");
 }
 
 type CocKeeperProps = {
-  initialState: MessageStateType;
-  onChange: (state: MessageStateType) => void;
-  onSave: (state: MessageStateType) => void;
+  initialState: StageState;
+  onSaveQueued: (state: StageState) => void;
 };
 
-function CocKeeper({initialState, onChange, onSave}: CocKeeperProps): ReactElement {
-  const [state, setState] = useState<MessageStateType>(initialState);
-  const investigators = state.investigators;
+function CocKeeper({initialState, onSaveQueued}: CocKeeperProps): ReactElement {
+  const [draftState, setDraftState] = useState<StageState>(initialState);
+  const [savedState, setSavedState] = useState<StageState>(initialState);
+  const [isDirty, setIsDirty] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("保存予約済み");
+  const investigators = draftState.investigators;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    loadIndexedState().then((stored) => {
+      if (cancelled || stored == null) {
+        return;
+      }
+
+      setDraftState(stored);
+      setSavedState(stored);
+      setIsDirty(false);
+      setSaveStatus("保存予約済み");
+      onSaveQueued(stored);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const summary = useMemo(() => {
     const wounded = investigators.filter((investigator) => investigator.majorWound).length;
@@ -137,16 +236,30 @@ function CocKeeper({initialState, onChange, onSave}: CocKeeperProps): ReactEleme
     return {wounded, clueLines};
   }, [investigators]);
 
-  function commit(nextState: MessageStateType): void {
-    const normalized = normalizeState(nextState);
-    setState(normalized);
-    onChange(normalized);
-    onSave(normalized);
-    saveStoredState(normalized);
+  function edit(nextState: StageState): void {
+    setDraftState(normalizeState(nextState));
+    setIsDirty(true);
+    setSaveStatus("未保存");
+  }
+
+  function save(): void {
+    const normalized = normalizeState(draftState);
+    setDraftState(normalized);
+    setSavedState(normalized);
+    setIsDirty(false);
+    setSaveStatus("保存予約済み");
+    saveStorageState(normalized);
+    onSaveQueued(normalized);
+  }
+
+  function restoreSaved(): void {
+    setDraftState(savedState);
+    setIsDirty(false);
+    setSaveStatus("保存予約済み");
   }
 
   function updateInvestigator(id: string, update: Partial<Investigator>): void {
-    commit({
+    edit({
       investigators: investigators.map((investigator) => {
         if (investigator.id !== id) {
           return investigator;
@@ -167,7 +280,7 @@ function CocKeeper({initialState, onChange, onSave}: CocKeeperProps): ReactEleme
   }
 
   function addInvestigator(): void {
-    commit({
+    edit({
       investigators: [...investigators, createInvestigator(`探索者 ${investigators.length + 1}`)],
     });
   }
@@ -177,7 +290,7 @@ function CocKeeper({initialState, onChange, onSave}: CocKeeperProps): ReactEleme
       return;
     }
 
-    commit({
+    edit({
       investigators: investigators.filter((investigator) => investigator.id !== id),
     });
   }
@@ -193,6 +306,20 @@ function CocKeeper({initialState, onChange, onSave}: CocKeeperProps): ReactEleme
           + 探索者
         </button>
       </header>
+
+      <section className="save-bar" aria-label="保存">
+        <span className={isDirty ? "save-bar__status save-bar__status--dirty" : "save-bar__status"}>
+          {saveStatus}
+        </span>
+        <div className="save-bar__actions">
+          <button className="coc-button" disabled={!isDirty} onClick={restoreSaved} type="button">
+            戻す
+          </button>
+          <button className="coc-button coc-button--primary" disabled={!isDirty} onClick={save} type="button">
+            保存
+          </button>
+        </div>
+      </section>
 
       <section className="coc-summary" aria-label="概要">
         <span>{investigators.length}人</span>
@@ -305,7 +432,7 @@ function StatControl({label, value, onChange, onStep}: StatControlProps): ReactE
         <input
           aria-label={label}
           inputMode="numeric"
-          onChange={(event) => onChange(normalizeNumber(Number(event.target.value)))}
+          onChange={(event) => onChange(normalizeNumber(event.target.value))}
           type="number"
           value={value}
         />
@@ -333,13 +460,13 @@ function MemoField({label, value, onChange}: MemoFieldProps): ReactElement {
 }
 
 export class Stage extends StageBase<InitStateType, ChatStateType, MessageStateType, ConfigType> {
-  private myInternalState: MessageStateType;
+  private savedState: StageState;
   private config: ConfigType;
 
   constructor(data: InitialData<InitStateType, ChatStateType, MessageStateType, ConfigType>) {
     super(data);
     this.config = data.config ?? {};
-    this.myInternalState = normalizeState(data.chatState ?? data.messageState ?? loadStoredState());
+    this.savedState = normalizeState(data.messageState ?? loadLocalState());
   }
 
   async load(): Promise<Partial<LoadResponse<InitStateType, ChatStateType, MessageStateType>>> {
@@ -352,50 +479,38 @@ export class Stage extends StageBase<InitStateType, ChatStateType, MessageStateT
     };
   }
 
-  async setState(state: MessageStateType): Promise<void> {
-    if (state == null) {
+  async setState(_state: MessageStateType): Promise<void> {
+    if (_state == null) {
       return;
     }
 
-    this.myInternalState = normalizeState(state);
-    saveStoredState(this.myInternalState);
+    this.savedState = normalizeState(_state);
+    saveStorageState(this.savedState);
   }
 
   async beforePrompt(_userMessage: Message): Promise<Partial<StageResponse<ChatStateType, MessageStateType>>> {
-    return this.persist(this.config.sendStatusToPrompt ?? true);
+    return this.respond(this.config.sendStatusToPrompt ?? true);
   }
 
   async afterResponse(_botMessage: Message): Promise<Partial<StageResponse<ChatStateType, MessageStateType>>> {
-    return this.persist(false);
+    return this.respond(false);
   }
 
   render(): ReactElement {
     return (
       <CocKeeper
-        key={JSON.stringify(this.myInternalState)}
-        initialState={this.myInternalState}
-        onChange={(state) => {
-          this.myInternalState = state;
-        }}
-        onSave={(state) => {
-          this.saveChatState(state);
+        initialState={this.savedState}
+        onSaveQueued={(state) => {
+          this.savedState = state;
         }}
       />
     );
   }
 
-  private saveChatState(state: MessageStateType): void {
-    this.messenger.updateChatState(state).catch((error) => {
-      console.warn("Failed to save CoC stage chat state.", error);
-    });
-  }
-
-  private persist(sendStatusToPrompt: boolean): Partial<StageResponse<ChatStateType, MessageStateType>> {
-    saveStoredState(this.myInternalState);
-
+  private respond(sendStatusToPrompt: boolean): Partial<StageResponse<ChatStateType, MessageStateType>> {
     return {
-      stageDirections: sendStatusToPrompt ? buildStageDirections(this.myInternalState) : null,
-      messageState: null,
+      stageDirections: sendStatusToPrompt ? buildStageDirections(this.savedState) : null,
+      messageState: sendStatusToPrompt ? this.savedState : null,
       modifiedMessage: null,
       systemMessage: null,
       error: null,
