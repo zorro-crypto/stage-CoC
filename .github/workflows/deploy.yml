@@ -42,7 +42,7 @@ jobs:
           if grep -q "^github_path:" public/chub_meta.yaml; then
             echo "Repo path already in metadata file."
           else
-            if ["${{ github.repository }}" == "CharHubAI/stage-template"]; then
+            if [ "${{ github.repository }}" == "CharHubAI/stage-template"]; then
               echo "Not saving repo name for template project"
             else
               echo "Writing github path 'https://github.com/${{ github.repository }}' to metadata file."
@@ -58,7 +58,7 @@ jobs:
              echo "Secret STAGE_ID does not exist; attempting to read from file"
              STAGE_ID=$(grep '^extension_id:' public/chub_meta.yaml | cut -d ':' -f2 | tr -d " '\"")
              if [ "${STAGE_ID}" == ""  ]; then
-                if ["${{ github.repository }}" == "CharHubAI/stage-template"]; then
+                if [ "${{ github.repository }}" == "CharHubAI/stage-template"]; then
                   echo "Not making ext id for template project"
                   STAGE_ID="extension-template-5523da8cf7de"
                 else
@@ -66,6 +66,8 @@ jobs:
                   sudo apt-get install jq
                   STAGE_ID=""
                   curl -H "CH-API-KEY: ${{ secrets.CHUB_AUTH_TOKEN }}" -H "Content-Type: application/json" --request POST --data '{"name":"${{ github.event.repository.name }}"}'  https://api.chub.ai/extensions  -o creation.json
+                  echo "Chub extension creation response:"
+                  cat creation.json
                   STAGE_ID=$(jq -r '.id_v2' creation.json)
                   if [ "${STAGE_ID}" == "" ] || [ "${STAGE_ID}" == "null" ]; then
                     echo "Extension ID creation failed; is your CHUB_AUTH_TOKEN secret set for this project?"
